@@ -1,0 +1,24 @@
+train: '/home/michael/animal/train/images'
+val: '/home/michael/animal/val/images'
+nc: 17
+
+
+names: [
+  'empty',
+  'animal',
+  'bird',
+  'bobcat',
+  'boycot',
+  'c',
+  'coyote',
+  'dd',
+  'deer',
+  'dog',
+  'none',
+  'person',
+  'pig',
+  'pwe',
+  'raccoon',
+  'rodent',
+  'skunk',
+]
