@@ -12,6 +12,10 @@ os.makedirs("processed", exist_ok=True)
 os.makedirs("no_bbox", exist_ok=True)
 
 def find_image(image_id, root_folder):
+    for root, dirs, files in os.walk(root_folder):
+        for file in files:
+            if adjusted_image_id in file:
+                return os.path.join(root, file)
     adjusted_image_id = image_id.replace("jldp:", "")
     for root, dirs, files in os.walk(root_folder):
         for file in files:

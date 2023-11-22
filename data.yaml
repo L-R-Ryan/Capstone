@@ -1,10 +1,10 @@
-train: '/home/michael/animal/train/images'
-val: '/home/michael/animal/val/images'
+train: '/home/michael/animal/yolo_train/images'
+val: '/home/michael/animal/yolo_val/images'
 nc: 17
 
 
 names: [
-  'empty',
+  'anomaly',
   'animal',
   'bird',
   'bobcat',
