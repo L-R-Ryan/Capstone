@@ -13,6 +13,7 @@ import numpy as np
 import datetime
 from sklearn.cluster import DBSCAN
 from sklearn.neighbors import NearestNeighbors
+import json
 
 
 # Load SimCLR model
@@ -47,6 +48,17 @@ def extract_features(simclr_model, img, device):
 
     return features.squeeze(0).cpu().numpy()
 
+def get_species_from_json(json_path):
+    with open(json_path, 'r') as file:
+        data = json.load(file)
+        annotations = data['annotations']
+    
+    my_species =  {}
+    for item in annotations:
+        image_id = item['image_id']
+        my_species[image_id+'.jpg'] = item['category_id']
+    return my_species
+
 # Run YOLO model and detect anomalies
 def detect_anomalies(yolo_model, image_path, simclr_model, svm_models, device, anomaly_dir):
     str_image_path = str(image_path)
@@ -65,12 +77,22 @@ def detect_anomalies(yolo_model, image_path, simclr_model, svm_models, device, a
         boxes = yolo_results[0].boxes.xywh.cpu()  # Extract bounding boxes in XYWH format
    
         class_values = yolo_results[0].boxes.cls.cpu()
+
+         # Save Anomalous Images
+        bbox_dir = os.path.join(anomaly_dir, "bbox")
+        os.makedirs(bbox_dir, exist_ok=True)
+
         
         idx = 0
         for box in boxes:
             x, y, w, h = box[:4].numpy()  # Convert tensor to numpy array
+            #print(x, y, w, h)
             x, y, w, h = int(x), int(y), int(w), int(h)  # Convert to integers
-            cropped_img = img.crop((x, y, x+w, y+h))
+            cropped_img = img.crop((x-w/2, y-h/2, x+w/2, y+h/2))
+            cropped_img_filename = f"cropped_{idx}_{os.path.basename(str_image_path)}"
+            cropped_img_path = os.path.join(bbox_dir, cropped_img_filename)
+            # Save the cropped image
+            #cropped_img.save(cropped_img_path)  #Turn on to confirm bounding boxes are cropped correctly
             features = extract_features(simclr_model, cropped_img, device)
             species_idx = class_values[idx] 
             species = get_species_name(species_idx)
@@ -137,7 +159,7 @@ def plot_tsne_clusters(transformed_features, filtered_species, species_color_map
         'person': 0.2,  # Example, replace with actual species and desired opacity
         'skunk': 0.2,
         'animal': 0.2,
-        'unknown': 0.2
+        'unknown': 0.6
         # Add more species and their opacities here
     }
 
@@ -155,7 +177,7 @@ def plot_tsne_clusters(transformed_features, filtered_species, species_color_map
         opacity = species_opacity.get(inv_species_color_map[species], 1.0)  # Default opacity is 1.0
         color = species_color.get(inv_species_color_map[species], colors[species_to_index[species]])
         plt.scatter(transformed_features[idx, 0], transformed_features[idx, 1], 
-                    color=color, alpha=opacity, s=10)
+                    color=color, alpha=opacity, s=5)
 
     # Create a legend, only including species with opacity >= 0.5
     handles = [
@@ -170,7 +192,7 @@ def plot_tsne_clusters(transformed_features, filtered_species, species_color_map
     plt.savefig(os.path.join(output_dir, "tsne_plot.png"))
     plt.close()
 
-def detect_anomalies_with_dbscan(transformed_features, image_paths, output_dir, eps=2.5, min_samples=10):
+def detect_anomalies_with_dbscan(transformed_features, image_paths, output_dir, eps=2, min_samples=10):
     # Perform DBSCAN clustering
 
     #plot to evaluate eps
@@ -241,6 +263,7 @@ def main():
     svm_models_dir = '/home/michael/animal/svm_models/'
     yolo_weights_path = '/home/michael/animal/runs/detect/train8/weights/best.pt'
     image_folder = Path('/home/michael/animal/unlabeled_anom_test/')
+    json_path = Path('/home/michael/animal/jldp-animl-cct.json')
 
     simclr_model = load_simclr_model(resnet_model_path, device)
     svm_models = load_svm_models(svm_models_dir)
@@ -261,11 +284,8 @@ def main():
     species_color_map = {}  # Mapping of species to numerical labels
     current_label = 0
 
-    species_map = {}
-    for root, dirs, files in os.walk(no_bbox_folder):
-        for file in files:
-            species_id = int(os.path.basename(root))
-            species_map[file] = species_id
+    species_map = get_species_from_json(json_path)
+
 
 
     for image_file in image_folder.glob('*.jpg'):
