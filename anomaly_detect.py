@@ -41,7 +41,8 @@ def extract_features(simclr_model, img, device):
     img_t = transform(img).unsqueeze(0).to(device)
     with torch.no_grad():
         features = simclr_model(img_t)
-        print(features)
+        #print(features)
+
     return features.squeeze(0).cpu().numpy()
 
 # Run YOLO model and detect anomalies
@@ -50,7 +51,8 @@ def detect_anomalies(yolo_model, image_path, simclr_model, svm_models, device, a
     img = Image.open(str_image_path)
 
     # Run YOLO prediction and save output with bounding boxes
-    yolo_results = yolo_model.predict(source=str_image_path, verbose=False, save=True, imgsz=640, conf=0.25)
+    yolo_results = yolo_model.predict(source=str_image_path, verbose = False, save=True, imgsz=640, conf=0.25)
+    #print(yolo_results[0])
 
     features_list = []
     labels_list = []
@@ -58,13 +60,21 @@ def detect_anomalies(yolo_model, image_path, simclr_model, svm_models, device, a
 
     # Check if results have boxes and process each detection
     if yolo_results and hasattr(yolo_results[0], 'boxes') and yolo_results[0].boxes is not None:
+    #if yolo_results[0].boxes is not None:
+        #print("hi")
         boxes = yolo_results[0].boxes.xywh.cpu()  # Extract bounding boxes in XYWH format
+   
+        class_values = yolo_results[0].boxes.cls.cpu()
+        
+        idx = 0
         for box in boxes:
+            #print(box)
             x, y, w, h = box[:4].numpy()  # Convert tensor to numpy array
             x, y, w, h = int(x), int(y), int(w), int(h)  # Convert to integers
             cropped_img = img.crop((x, y, x+w, y+h))
             features = extract_features(simclr_model, cropped_img, device)
-            species = get_species_name(int(box[5]))  # Assuming the 6th element is the class index
+            species_idx = class_values[idx] 
+            species = get_species_name(species_idx)
 
             is_anomaly = species in svm_models and svm_models[species].predict([features])[0] == -1
             if is_anomaly:
@@ -72,8 +82,9 @@ def detect_anomalies(yolo_model, image_path, simclr_model, svm_models, device, a
 
             features_list.append(features)
             labels_list.append(1 if is_anomaly else 0)
+            idx = idx +1
 
-    print(f"Total features extracted: {len(features_list)}, Anomalies detected: {anomaly_count}")
+    #print(f"Total features extracted: {len(features_list)}, Anomalies detected: {anomaly_count}")
     return features_list, labels_list
 
 
@@ -116,20 +127,15 @@ def detect_anomalies_and_visualize(resnet_model, svm_models, yolo_model, image_p
         tsne_labels.append(1 if is_anomaly else 0)
 
 def plot_tsne_clusters(features, labels, output_dir):
-    # Filter out None values from features and corresponding labels
-    filtered_features = [feat for feat, label in zip(features, labels) if feat is not None]
-    filtered_labels = [label for feat, label in zip(features, labels) if feat is not None]
+    # Filter out None or empty values
+    filtered_features = [feat for feat in features if len(feat) > 0]
+    filtered_labels = [labels[i] for i, feat in enumerate(features) if len(feat) > 0]
 
-    # Check if filtered_features has elements to process
     if filtered_features:
-        # Convert list of arrays to a 2D NumPy array
         features_array = np.vstack(filtered_features)
-
-        # Apply t-SNE
         tsne = TSNE(n_components=2, random_state=0)
         transformed_features = tsne.fit_transform(features_array)
 
-        # Plot
         plt.scatter(transformed_features[:, 0], transformed_features[:, 1], c=filtered_labels)
         plt.colorbar()
         plt.title("t-SNE Visualization of Features")
@@ -164,9 +170,10 @@ def main():
     tsne_labels = []
 
     for image_file in image_folder.glob('*.jpg'):
-        features, is_anomaly = detect_anomalies(yolo_model, image_file, simclr_model, svm_models, device, anomaly_dir)
-        tsne_features.append(features)
-        tsne_labels.append(1 if is_anomaly else 0)
+        features_per_image, labels_per_image = detect_anomalies(yolo_model, image_file, simclr_model, svm_models, device, anomaly_dir)
+        for feature, label in zip(features_per_image, labels_per_image):
+            tsne_features.append(feature)
+            tsne_labels.append(label)
 
     # Generate and save t-SNE plot
     plot_tsne_clusters(tsne_features, tsne_labels, output_dir)

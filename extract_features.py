@@ -3,10 +3,10 @@ import torch.nn as nn
 from torchvision.models import resnet50, ResNet50_Weights
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
 from PIL import Image
-from sklearn.svm import OneClassSVM
 from pathlib import Path
 import json
 from ultralytics import YOLO
+import joblib
 
 def load_simclr_model(model_path, device):
     # Initialize the ResNet model
@@ -19,19 +19,13 @@ def load_simclr_model(model_path, device):
     encoder.eval()
     return encoder
 
-def read_bounding_box_data(json_path):
-    with open(json_path, 'r') as file:
-        data = json.load(file)
-
-    bbox_data = {}
-    for item in data:
-        if 'image_id' in item and 'bbox' in item and isinstance(item['bbox'], list):
-            if all(v is not None for v in item['bbox']):  # Check if all bbox values are not None
-                # Adjust image_id if needed
-                image_id = item['image_id']
-                bbox_data[image_id] = item['bbox']
-
-    return bbox_data
+def load_svm_models(svm_dir):
+    svm_models = {}
+    for svm_file in os.listdir(svm_dir):
+        if svm_file.endswith('.joblib'):
+            species = svm_file.split('_')[0]
+            svm_models[species] = joblib.load(os.path.join(svm_dir, svm_file))
+    return svm_models
 
 def extract_resnet_features(resnet_model, image_path, bbox_data, device):
     transform = Compose([
@@ -49,7 +43,7 @@ def extract_resnet_features(resnet_model, image_path, bbox_data, device):
 
     with Image.open(image_path) as img:
         if bbox_info:
-            x, y, width, height = bbox_info
+            x, y, width, height = bbox_info ########## IS THIS CODE REDUNDANT WITH THE BBOX CODE UP THERE????
             x_min, y_min = x, y
             x_max, y_max = x + width, y + height
             img = img.crop((x_min, y_min, x_max, y_max))
@@ -58,18 +52,11 @@ def extract_resnet_features(resnet_model, image_path, bbox_data, device):
         with torch.no_grad():
             features = resnet_model(img)
 
-    return image_id, features, bbox_info
+    species = identify_species(image_path)  # Implement this function based on your data
+    return image_id, features, bbox_info, species
 
-
-def apply_novelty_detection(features):
-    # Initialize a One-Class SVM
-    oc_svm = OneClassSVM(gamma='auto')
-    oc_svm.fit(features)
-    anomaly_scores = oc_svm.decision_function(features)
-    # Set a threshold for anomaly detection (this needs to be tuned)
-    threshold = -0.1 
-    anomalies = [i for i, score in enumerate(anomaly_scores) if score < threshold]
-    return anomalies
+def identify_species(image_path):
+    # Implement your species identification logic here...
 
 def load_yolo_model():
     # Load the YOLO model
@@ -82,29 +69,6 @@ def load_yolo_model():
     model.eval()
     return model
 
-def validate_with_yolo(yolo_model, image_path, anomaly_indices, features):
-    # Convert features tensor to a list of lists for One-Class SVM
-    features_list = features.cpu().detach().numpy().tolist()
-    # Initialize a One-Class SVM and fit it on the features
-    oc_svm = OneClassSVM(gamma='auto').fit(features_list)
-    # Get the decision function scores
-    decision_scores = oc_svm.decision_function(features_list)
-    # Predict anomalies based on decision scores
-    anomalies = [i for i, score in enumerate(decision_scores) if score < 0]  # Anomaly threshold
-
-    # Run YOLO prediction on the image
-    yolo_results = yolo_model.predict(image_path)
-
-    # Compare YOLO predictions with anomalies detected by One-Class SVM
-    validated_anomalies = []
-    for anomaly_index in anomalies:
-        # Retrieve the bounding box of the anomaly
-        anomaly_bbox = get_anomaly_bbox(anomaly_index, yolo_results)
-        # Check if the anomaly overlaps with YOLO detections
-        if is_anomaly_in_yolo_detections(yolo_results['detections'], anomaly_bbox):
-            validated_anomalies.append(anomaly_index)
-
-    return validated_anomalies
 
 def get_anomaly_bbox(anomaly_index, yolo_results):
     # Extract the bounding box from YOLO results for the given anomaly index
@@ -132,19 +96,6 @@ def is_anomaly_in_yolo_detections(detected_objects, anomaly_bbox, confidence_thr
             return True
     return False
 
-def do_boxes_overlap(box1, box2):
-    """
-    Check if two bounding boxes overlap.
-    
-    :param box1: First bounding box (x1, y1, x2, y2).
-    :param box2: Second bounding box (x1, y1, x2, y2).
-    :return: Boolean indicating if boxes overlap.
-    """
-    # Check if boxes do not overlap
-    if (box1[2] < box2[0] or box1[0] > box2[2] or
-        box1[3] < box2[1] or box1[1] > box2[3]):
-        return False
-    return True
 
 def bbox_overlap(bbox1, bbox2):
     """
@@ -181,50 +132,29 @@ def bbox_overlap(bbox1, bbox2):
     return overlap_ratio > 0.5
 
 
-def detect_anomalies(resnet_model, yolo_model, image_path):
-    features = extract_resnet_features(resnet_model, image_path)
-    anomalies = apply_novelty_detection(features)
-    validated_anomalies = validate_with_yolo(yolo_model, image_path, anomalies)
-    return validated_anomalies
+def detect_anomalies(resnet_model, svm_models, yolo_model, image_path, device):
+    image_id, features, species = extract_resnet_features(resnet_model, image_path, device)
+    if features is not None:
+        svm_model = svm_models.get(species)
+        if svm_model and svm_model.predict([features])[0] == -1:
+            yolo_results = yolo_model.predict(image_path)
+            # Further processing with YOLO results and anomaly detection...
+            # ...
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load models
+    # Load models and SVMs
     resnet_model_path = '/home/michael/animal/simclr_runs/run_20231119-185055/encoder_epoch_97.pth'
     resnet_model = load_simclr_model(resnet_model_path, device)
+    svm_models_dir = '/home/michael/animal/svm_models/'
+    svm_models = load_svm_models(svm_models_dir)
     yolo_model = load_yolo_model()
-    
 
-    # Paths
+    # Process images
     image_folder = Path('/home/michael/animal/unlabeled_anom_test/')
-    json_path = Path('/home/michael/animal/jldp-animl-cct.json')
-    output_path = Path('/home/michael/animal/features.txt')
-
-    # Read bounding box data
-    bbox_data = read_bounding_box_data(json_path)
-    bbox_data = bbox_data if bbox_data is not None else {}
-
-    # Process each image
     for image_file in image_folder.glob('*.jpg'):
-        image_id = image_file.stem
-
-        # Skip JSON lookup for images starting with "anomaly"
-        bbox_info = None if image_id.startswith("anomaly") else bbox_data.get(image_id, None)
-
-        # Extract features
-        image_id, features, bbox_info = extract_resnet_features(resnet_model, image_file, bbox_info, device)
-
-        if features is not None:
-            # Save extracted features, image ID, and bbox_info
-            with open(output_path, 'a') as f:
-                f.write(f"{image_id},{features.cpu().numpy().tolist()},{bbox_info}\n")
-
-            # Detect anomalies
-            anomalies = detect_anomalies(resnet_model, yolo_model, image_file)
-            print(f"Detected anomalies for {image_id}: {anomalies}")
-        else:
-            print(f"Warning: No features extracted for image {image_id}")
+        detect_anomalies(resnet_model, svm_models, yolo_model, image_file, device)
 
 if __name__ == '__main__':
     main()
