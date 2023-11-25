@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 import numpy as np
 import datetime
+from sklearn.cluster import DBSCAN
+from sklearn.neighbors import NearestNeighbors
 
 
 # Load SimCLR model
@@ -51,8 +53,7 @@ def detect_anomalies(yolo_model, image_path, simclr_model, svm_models, device, a
     img = Image.open(str_image_path)
 
     # Run YOLO prediction and save output with bounding boxes
-    yolo_results = yolo_model.predict(source=str_image_path, verbose = False, save=True, imgsz=640, conf=0.25)
-    #print(yolo_results[0])
+    yolo_results = yolo_model.predict(source=str_image_path, verbose = False, save=False, imgsz=640, conf=0.25)
 
     features_list = []
     labels_list = []
@@ -61,14 +62,12 @@ def detect_anomalies(yolo_model, image_path, simclr_model, svm_models, device, a
     # Check if results have boxes and process each detection
     if yolo_results and hasattr(yolo_results[0], 'boxes') and yolo_results[0].boxes is not None:
     #if yolo_results[0].boxes is not None:
-        #print("hi")
         boxes = yolo_results[0].boxes.xywh.cpu()  # Extract bounding boxes in XYWH format
    
         class_values = yolo_results[0].boxes.cls.cpu()
         
         idx = 0
         for box in boxes:
-            #print(box)
             x, y, w, h = box[:4].numpy()  # Convert tensor to numpy array
             x, y, w, h = int(x), int(y), int(w), int(h)  # Convert to integers
             cropped_img = img.crop((x, y, x+w, y+h))
@@ -110,40 +109,127 @@ def get_species_name(cls_index): #ignore anomaly I thought I could make an anoma
     }
     return species_mapping.get(cls_index, 'unknown')
 
-
-
-def detect_anomalies_and_visualize(resnet_model, svm_models, yolo_model, image_path, device, anomaly_dir, feature_file, tsne_features, tsne_labels):
-    image_id, features, species = extract_resnet_features(resnet_model, image_path, device)
-    is_anomaly = False
-    if features is not None:
-        svm_model = svm_models.get(species)
-        if svm_model and svm_model.predict([features])[0] == -1:
-            is_anomaly = True
-            shutil.copy(image_path, os.path.join(anomaly_dir, os.path.basename(image_path)))
-        with open(feature_file, 'a') as f:
-            f.write(f"{image_id}: {features.tolist()}\n")
-
-        tsne_features.append(features)
-        tsne_labels.append(1 if is_anomaly else 0)
-
-def plot_tsne_clusters(features, labels, output_dir):
-    # Filter out None or empty values
+def get_transformed_features(features, species_labels, image_paths):
     filtered_features = [feat for feat in features if len(feat) > 0]
-    filtered_labels = [labels[i] for i, feat in enumerate(features) if len(feat) > 0]
+    filtered_species = [species_labels[i] for i, feat in enumerate(features) if len(feat) > 0]
+    filtered_image_paths = [image_paths[i] for i, feat in enumerate(features) if len(feat) > 0]
 
-    if filtered_features:
-        features_array = np.vstack(filtered_features)
-        tsne = TSNE(n_components=2, random_state=0)
-        transformed_features = tsne.fit_transform(features_array)
+    features_array = np.vstack(filtered_features)
+    tsne = TSNE(n_components=2, random_state=0)
+    transformed_features = tsne.fit_transform(features_array)
 
-        plt.scatter(transformed_features[:, 0], transformed_features[:, 1], c=filtered_labels)
-        plt.colorbar()
-        plt.title("t-SNE Visualization of Features")
-        # Save the plot in the specified output directory
-        plt.savefig(os.path.join(output_dir, "tsne_plot.png"))
-        plt.close()  # Close the plot to free up memory
-    else:
-        print("No valid features to visualize.")
+    return transformed_features, filtered_species, filtered_image_paths
+
+#Calls DBScan for anomaly detection inside this function - bad programing, should be separated
+def plot_tsne_clusters(transformed_features, filtered_species, species_color_map, output_dir):
+    # Invert species_color_map
+    inv_species_color_map = {v: "Anomaly" if k == "Anomaly" else get_species_name(k) for k, v in species_color_map.items()}
+
+    # Map species to indices
+    unique_species = list(set(filtered_species))
+    species_to_index = {species: i for i, species in enumerate(unique_species)}
+
+    # Assign colors and opacities based on indices
+    colors = plt.cm.viridis(np.linspace(0, 1, len(unique_species)))
+
+    # Species to opacity mapping
+    species_opacity = {
+        'person': 0.2,  # Example, replace with actual species and desired opacity
+        'skunk': 0.2,
+        'animal': 0.2,
+        'unknown': 0.2
+        # Add more species and their opacities here
+    }
+
+        # Species to opacity mapping
+    species_color = {
+        'bobcat': 'red',  # Example, replace with actual species and desired opacity
+        'Anomaly': 'orange',
+        'deer': 'mediumorchid'
+        # Add more species and their opacities here
+    }
+
+    # Plot with varying opacities
+    for i, species in enumerate(unique_species):
+        idx = [j for j, spec in enumerate(filtered_species) if spec == species]
+        opacity = species_opacity.get(inv_species_color_map[species], 1.0)  # Default opacity is 1.0
+        color = species_color.get(inv_species_color_map[species], colors[species_to_index[species]])
+        plt.scatter(transformed_features[idx, 0], transformed_features[idx, 1], 
+                    color=color, alpha=opacity, s=10)
+
+    # Create a legend, only including species with opacity >= 0.5
+    handles = [
+        plt.Line2D([0], [0], marker='o', color='w', label=inv_species_color_map[species],
+                markersize=10, markerfacecolor=species_color.get(inv_species_color_map[species], colors[species_to_index[species]]),
+                alpha=species_opacity.get(species, 1.0))
+        for species in unique_species if species_opacity.get(inv_species_color_map[species], 1.0) >= 0.5
+    ]
+    plt.legend(handles=handles, title="Species")
+
+    plt.title("t-SNE Visualization of Features")
+    plt.savefig(os.path.join(output_dir, "tsne_plot.png"))
+    plt.close()
+
+def detect_anomalies_with_dbscan(transformed_features, image_paths, output_dir, eps=2.5, min_samples=10):
+    # Perform DBSCAN clustering
+
+    #plot to evaluate eps
+    nn = NearestNeighbors(n_neighbors=min_samples)
+    nn.fit(transformed_features)
+    distances, indices = nn.kneighbors(transformed_features)
+
+    # Sort the distances to the k-th nearest neighbor
+    kth_distances = np.sort(distances[:, min_samples - 1])
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(kth_distances)
+    plt.xlabel('Points sorted by distance')
+    plt.ylabel(f'Distance to {min_samples}-th nearest neighbor')
+    plt.title('k-distance Plot')
+    plt.grid(True)
+    
+    # Save the plot
+    eps_path = os.path.join(output_dir, "dbscan_eps_evaluation.png")
+    plt.savefig(eps_path)
+    print(f"Plot saved to {eps_path}")
+    plt.close()
+
+
+    db = DBSCAN(eps=eps, min_samples=min_samples).fit(transformed_features)
+    labels = db.labels_
+    
+    # Identify points classified as noise by DBSCAN (-1 label)
+    anomalies_indices = np.where(labels == -1)[0]
+    non_anomalies_indices = np.where(labels != -1)[0]
+    
+    # Print the number of anomalies detected
+    print(f"Number of anomalies detected: {len(anomalies_indices)}")
+    
+    # Plot the results
+    plt.figure(figsize=(12, 8))
+    plt.scatter(transformed_features[non_anomalies_indices, 0], transformed_features[non_anomalies_indices, 1], 
+                c='blue', label='Normal', s=30)
+    plt.scatter(transformed_features[anomalies_indices, 0], transformed_features[anomalies_indices, 1], 
+                c='red', label='Anomaly', s=30)
+    plt.title('DBSCAN Anomaly Detection')
+    plt.xlabel('Feature 1')
+    plt.ylabel('Feature 2')
+    plt.legend()
+    
+    # Save the plot
+    plot_path = os.path.join(output_dir, "dbscan_anomaly_detection.png")
+    plt.savefig(plot_path)
+    print(f"Plot saved to {plot_path}")
+    plt.close()
+    
+    # Save Anomalous Images
+    anomaly_dir = os.path.join(output_dir, "anomalies")
+    os.makedirs(anomaly_dir, exist_ok=True)
+    for index in anomalies_indices:
+        anomaly_image_path = image_paths[index]
+        shutil.copy(anomaly_image_path, anomaly_dir)
+        #print(f"Anomalous image saved to {anomaly_dir}")
+
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -168,15 +254,49 @@ def main():
 
     tsne_features = []
     tsne_labels = []
+    tsne_image_paths = []
+
+    no_bbox_folder = Path('/home/michael/animal/no_bbox/')
+
+    species_color_map = {}  # Mapping of species to numerical labels
+    current_label = 0
+
+    species_map = {}
+    for root, dirs, files in os.walk(no_bbox_folder):
+        for file in files:
+            species_id = int(os.path.basename(root))
+            species_map[file] = species_id
+
 
     for image_file in image_folder.glob('*.jpg'):
-        features_per_image, labels_per_image = detect_anomalies(yolo_model, image_file, simclr_model, svm_models, device, anomaly_dir)
-        for feature, label in zip(features_per_image, labels_per_image):
+        file_name = image_file.name
+
+        # Check if the filename begins with "anomaly"
+        if file_name.startswith('anomaly'):
+            species = 'Anomaly'
+        else:
+            # Extract species name from the folder structure
+            species = species_map.get(file_name, "Unknown")
+
+        # Assign or retrieve numerical label for species
+        if species not in species_color_map:
+            species_color_map[species] = current_label
+            current_label += 1
+        numerical_label = species_color_map[species]
+
+        features, _ = detect_anomalies(yolo_model, image_file, simclr_model, svm_models, device, anomaly_dir)
+        for feature in features:
             tsne_features.append(feature)
-            tsne_labels.append(label)
+            tsne_labels.append(numerical_label)
+            tsne_image_paths.append(image_file)
+
+   # print(species_color_map)
 
     # Generate and save t-SNE plot
-    plot_tsne_clusters(tsne_features, tsne_labels, output_dir)
+    transformed_features, filtered_species, filtered_image_paths =  get_transformed_features(tsne_features, tsne_labels, tsne_image_paths)
+
+    plot_tsne_clusters(transformed_features, filtered_species, species_color_map, output_dir)
+    detect_anomalies_with_dbscan(transformed_features, filtered_image_paths, anomaly_dir)
 
 
 if __name__ == '__main__':
